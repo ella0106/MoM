@@ -19,9 +19,9 @@ import shutil
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 import torch
-from llava.mom.utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.mom.utils.utils import rank0_print
-from llava.mom.model.llava_qwen_mom import LlavaQwenMomForCausalLM, LlavaQwenMomConfig
+from MoM.utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from MoM.utils.utils import rank0_print
+from MoM.model.llava_qwen_mom import LlavaQwenMomForCausalLM, LlavaQwenMomConfig
 from peft import LoraConfig, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map=None, torch_dtype="float16",attn_implementation="flash_attention_2", customized_config=None, overwrite_config=None, **kwargs):

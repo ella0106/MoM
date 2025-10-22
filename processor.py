@@ -1,4 +1,4 @@
-from utils.utils import *
+from MoM.utils.utils import *
 
 from mvextractor.videocap import VideoCap
 

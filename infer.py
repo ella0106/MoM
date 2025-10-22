@@ -1,8 +1,8 @@
-from llava.mom.utils.utils import *
-from llava.mom.dataset import *
-from llava.mom.builder import load_pretrained_model
-from llava.mom.utils.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IGNORE_INDEX
-from llava.mom.utils.conversation import conv_templates
+from MoM.utils.utils import *
+from MoM.dataset import CustomDataset, DataCollatorForCustomDataset
+from MoM.builder import load_pretrained_model
+from MoM.utils.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IGNORE_INDEX
+from MoM.utils.conversation import conv_templates
 from transformers import GenerationConfig
 
 def set_seed(seed: int = 42):

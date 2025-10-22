@@ -1,7 +1,7 @@
-from llava.mom.utils.utils import *
-from llava.mom.dataset import CustomDataset, DataCollatorForCustomDataset
-from llava.mom.builder import get_model
-from llava.mom.utils.constants import IGNORE_INDEX
+from MoM.utils.utils import *
+from MoM.dataset import CustomDataset, DataCollatorForCustomDataset
+from MoM.builder import get_model
+from MoM.utils.constants import IGNORE_INDEX
 from transformers import get_linear_schedule_with_warmup
 amp_dtype = torch.float16
 

@@ -1,6 +1,6 @@
-from llava.mom.utils.utils import *
-from llava.mom.utils.conversation import conv_templates
-from llava.mom.processor import MotionVectorExtractor, MotionFeatureExtractor
+from MoM.utils.utils import *
+from MoM.utils.conversation import conv_templates
+from MoM.processor import MotionVectorExtractor, MotionFeatureExtractor
 from transformers import AutoTokenizer
 
 

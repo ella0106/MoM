@@ -24,10 +24,10 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
-from llava.mom.model.llava_arch_mom import LlavaMetaModel, LlavaMetaForCausalLM
+from MoM.model.llava_arch_mom import LlavaMetaModel, LlavaMetaForCausalLM
 from transformers import Qwen2Config, Qwen2Model, Qwen2ForCausalLM
-from llava.mom.encoder import MVResidualModel
-from llava.mom.processor import MotionVectorExtractor, MotionFeatureExtractor
+from MoM.encoder import MVResidualModel
+from MoM.processor import MotionVectorExtractor, MotionFeatureExtractor
 
 
 class LlavaQwenMomConfig(Qwen2Config):
