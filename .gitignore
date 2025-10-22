@@ -1,0 +1,7 @@
+assets/
+dataset/
+__pycache__/
+*.pyc
+results/
+tmp/
+scripts/
