@@ -62,7 +62,7 @@ class CrossAttentionBlock(nn.Module):
 # 전체 모델
 # ----------------------------
 class MVResidualModel(nn.Module):
-    def __init__(self, in_chans_mv=2, in_chans_res=3, dim=768, num_gops=500, num_frames=12, depth=2, heads=8):
+    def __init__(self, in_chans_mv=2, in_chans_res=3, dim=768, num_gops=100, num_frames=12, depth=2, heads=8):
         super().__init__()
         
         self.mv_encoder = FrameEncoder(in_chans_mv, dim)
