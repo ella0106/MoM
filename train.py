@@ -26,6 +26,7 @@ def build_dataloader(args, tokenizer, max_length):
     dataset = CustomDataset(
         video_dir=args.video_dir,
         txt=args.train_ann,
+        temp_dir=args.temp_dir,
         tokenizer=tokenizer,
         max_len=max_length,
         conv_template="qwen_1_5"
@@ -72,8 +73,8 @@ def save_checkpoint_step(model_engine, tokenizer, model, save_dir, global_step):
         os.makedirs(step_dir, exist_ok=True)
         model_engine.save_checkpoint(step_dir)
         try:
-            model.save_pretrained(step_dir)
-            tokenizer.save_pretrained(step_dir)
+            custom_weights_path = os.path.join(step_dir, "MoM.pt")
+            torch.save(model.module.mvresidual.state_dict(), custom_weights_path)
         except Exception:
             pass
         print(f"💾 Checkpoint saved at step {global_step} -> {step_dir}")
@@ -82,7 +83,7 @@ def train(args):
     set_seed(2025)
     tokenizer, model, image_processor, max_length = get_model(args)
     trainable = [p for p in model.parameters() if p.requires_grad]
-
+    
     optimizer = torch.optim.AdamW(
         trainable, lr=args.lr, weight_decay=args.weight_decay
     )
@@ -98,21 +99,11 @@ def train(args):
         model=model,
         model_parameters=trainable,
         optimizer=optimizer,
-        lr_scheduler=scheduler
+        lr_scheduler=scheduler,
     )
     
-    for name, param in model_engine.module.named_parameters(recurse=True):
-        if "mvresidual" in name or any(k in name for k in ["motion_end", "motion_start", "motion_newline"]):
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
-
-    trainable_params = [p for p in model_engine.module.parameters(recurse=True) if p.requires_grad]
-    print(f"Total trainable parameters: {sum(p.numel() for p in trainable_params)}")
-
-            
-            
     model_engine.train()
+    
     global_step = 0
 
     for epoch in range(args.epochs):
@@ -128,16 +119,7 @@ def train(args):
 
             batch = to_device(batch, model_engine.device)
 
-            # 현재 모델 시그니처는 images만 받음. motion/residual은 사용 X
-            outputs = model_engine(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                images=batch["images"],
-                labels=batch["labels"],
-                motion_feats=batch["motion_feats"],
-                residual_feats=batch["residual_feats"],
-                modalities=batch["modalities"],
-            )
+            outputs = model_engine(**batch)
             loss = outputs.loss
 
             model_engine.backward(loss)
@@ -150,7 +132,7 @@ def train(args):
 
             global_step += 1
 
-        if global_step % args.save_steps == 0:
+        if (global_step+1) % args.save_steps == 0:
             save_checkpoint_step(model_engine, tokenizer, model, args.output_dir, global_step)
 
     if model_engine.global_rank == 0:
@@ -178,6 +160,7 @@ if __name__ == "__main__":
     p.add_argument("--local_rank", type=int, default=-1, help="(automatically passed by deepspeed/torchrun)")
     p.add_argument("--master_port", type=int, default=29500)
     p.add_argument("--master_addr", type=str)
+    p.add_argument("--temp_dir", type=str, default="tmp")
     
     args = p.parse_args()
     

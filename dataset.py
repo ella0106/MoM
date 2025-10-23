@@ -18,13 +18,13 @@ def tokenize_with_labels(tokenizer, prompt, answer, max_length):
     return input_ids, labels
 
 class CustomDataset(Dataset):
-    def __init__(self, video_dir, txt, tokenizer=None, max_len=None, conv_template=None):
+    def __init__(self, video_dir, txt, temp_dir, tokenizer=None, max_len=None, conv_template=None):
         self.video_dir = video_dir
         self.data = load_file(txt)
         self.tokenizer = tokenizer
         self.max_length = max_len
         self.conv_template = conv_template
-        self.mve = MotionVectorExtractor(temp_dir="tmp")
+        self.mve = MotionVectorExtractor(temp_dir=temp_dir)
         self.mfe = MotionFeatureExtractor()
 
     def __len__(self):

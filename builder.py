@@ -21,11 +21,11 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAn
 import torch
 from utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from utils.utils import rank0_print
-from model.llava_qwen_mom import LlavaQwenMomForCausalLM, LlavaQwenMomConfig
-from peft import LoraConfig, prepare_model_for_kbit_training, PeftModel, get_peft_model
+from model.llava_qwen_mom import LlavaQwenMomForCausalLM
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map=None, torch_dtype="float16",attn_implementation="flash_attention_2", customized_config=None, overwrite_config=None, **kwargs):
     kwargs["device_map"] = device_map
+    # rank0_print("device_map:", device_map)
 
     if load_8bit:
         kwargs["load_in_8bit"] = True
@@ -93,6 +93,7 @@ def get_model(args):
     device_map = None
     tokenizer, model, image_processor, max_length = load_pretrained_model(model_name, None, model_type, torch_dtype="float16", device_map=device_map,)  # Add any other thing you want to pass in llava_model_args
     
+    model.config.tokenizer_padding_side = "left"
     model.requires_grad_(False)
     
     if hasattr(model.config, "use_flash_attention_2"):
@@ -105,11 +106,16 @@ def get_model(args):
         if hasattr(model.model, attr):
             getattr(model.model, attr).requires_grad_(True)
 
-    # if hasattr(model.model, 'mm_projector'):
-    #     model.model.mm_projector.requires_grad_(True)
-
-    # for name, param in model.named_parameters():
-    #     if "lora" in name:
-    #         param.requires_grad = True
+    trainable_params = 0
+    all_param = 0
+    for name, param in model.named_parameters():
+        num_params = param.numel()
+        if param.requires_grad:
+            trainable_params += num_params
+        all_param += num_params
+        
+    print(f"trainable params: {trainable_params} || ")
+    print(f"all params: {all_param} || ")
+    print(f"trainable%: {100 * trainable_params / all_param:.2f}")
 
     return tokenizer, model, image_processor, max_length

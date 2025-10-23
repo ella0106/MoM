@@ -5,6 +5,24 @@ from utils.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_S
 from utils.conversation import conv_templates
 from transformers import GenerationConfig
 
+def to_device(batch, device):
+    """
+    배치를 주어진 device로 안전하게 이동.
+    input_ids, labels, attention_mask, images만 사용.
+    (motion_feats, residual_feats는 현재 모델 시그니처상 전달하지 않음)
+    """
+    out = {}
+    for k, v in batch.items():
+        if torch.is_tensor(v):
+            # 멀티모달 텐서는 AMP dtype으로
+            if k in ("images", "motion_feats", "residual_feats"):
+                out[k] = v.to(device=device, dtype=amp_dtype, non_blocking=True)
+            else:
+                out[k] = v.to(device=device, non_blocking=True)
+        else:
+            out[k] = v
+    return out
+
 def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -42,6 +60,21 @@ def main(args):
     dataset = CustomDataset(
         video_dir=args.video_dir,
         txt=args.dataset,
+        tokenizer=tokenizer,
+        max_len=max_length,
+        conv_template="qwen_1_5"
+    )
+    
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    collator = DataCollatorForCustomDataset(pad_token_id=pad_id, ignore_index=IGNORE_INDEX)
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=1,  # DS에서 실제 마이크로 배치는 config로도 관리됨
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        collate_fn=collator
     )
     
     gen_config = GenerationConfig(
@@ -51,21 +84,19 @@ def main(args):
     )
     
     results = {}
-    for i, (video_path, question, _) in enumerate(tqdm(dataset)):
-        # print(video_path, question)
-        conv_template = "qwen_1_5"  # Make sure you use correct chat template for different models
-        question = DEFAULT_IMAGE_TOKEN + question
-        conv = copy.deepcopy(conv_templates[conv_template])
-        conv.append_message(conv.roles[0], question)
-        conv.append_message(conv.roles[1], None)
-        prompt_question = conv.get_prompt()
+    for i, batch in enumerate(tqdm(loader)):
+        batch = to_device(batch, model.device)
+        if batch["input_ids"].dim() == 3 and batch["input_ids"].size(0) == 1:
+                batch["input_ids"] = batch["input_ids"].squeeze(0)
+                batch["labels"] = batch["labels"].squeeze(0)
+                batch["attention_mask"] = batch["attention_mask"].squeeze(0)
         
-        input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(device)
-
         cont = model.generate(
-            input_ids,
-            images=video_path,
-            modalities= ["video"],
+            inputs=batch["input_ids"],
+            images=batch["images"],
+            motion_feats=batch["motion_feats"],
+            residual_feats=batch["residual_feats"],
+            modalities=batch["modalities"],
             generation_config=gen_config,
         )
         output = tokenizer.decode(cont[0], skip_special_tokens=True)
