@@ -5,3 +5,4 @@ __pycache__/
 results/
 tmp/
 scripts/
+checkpoints/

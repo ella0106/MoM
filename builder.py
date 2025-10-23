@@ -19,9 +19,9 @@ import shutil
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 import torch
-from MoM.utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from MoM.utils.utils import rank0_print
-from MoM.model.llava_qwen_mom import LlavaQwenMomForCausalLM, LlavaQwenMomConfig
+from utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from utils.utils import rank0_print
+from model.llava_qwen_mom import LlavaQwenMomForCausalLM, LlavaQwenMomConfig
 from peft import LoraConfig, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map=None, torch_dtype="float16",attn_implementation="flash_attention_2", customized_config=None, overwrite_config=None, **kwargs):
@@ -93,7 +93,7 @@ def get_model(args):
     device_map = None
     tokenizer, model, image_processor, max_length = load_pretrained_model(model_name, None, model_type, torch_dtype="float16", device_map=device_map,)  # Add any other thing you want to pass in llava_model_args
     
-    # model.requires_grad_(False)
+    model.requires_grad_(False)
     
     if hasattr(model.config, "use_flash_attention_2"):
         model.config.use_flash_attention_2 = True

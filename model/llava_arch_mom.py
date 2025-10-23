@@ -27,8 +27,8 @@ import functools
 from .builder import build_vision_projector, build_vision_resampler, build_vision_tower
 import subprocess
 
-from MoM.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from MoM.utils.utils import rank0_print, rank_print
+from utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from utils.utils import rank0_print, rank_print
 
 import random
 
