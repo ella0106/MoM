@@ -1,4 +1,4 @@
-from MoM.utils.utils import *
+from utils.utils import *
 
 # ----------------------------
 # Frame encoder

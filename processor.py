@@ -8,7 +8,7 @@ class MotionVectorExtractor:
                  max_frames=12, sample_size=6, seed=2024,
                  transcode_height=480,   # 밸런스: 480p(원본이 작으면 스킵)
                  mb_size=16):
-        self.temp_dir = temp_dir if temp_dir is not None else './tmp'
+        self.temp_dir = temp_dir if temp_dir is not None else 'tmp'
         self.rescale = rescale
         self.ffmpeg_path = ffmpeg_path if ffmpeg_path is not None else '/home/aix23103/anaconda3/envs/llavanext/bin/ffmpeg'
         self.max_frames = max_frames
@@ -37,21 +37,27 @@ class MotionVectorExtractor:
         else:
             cmd = [
                 "ffmpeg",
-                "-i", video_path,        # 입력 파일
-                "-r", "6",               # 출력 프레임레이트 6fps
-                "-c:v", "libx264",       # H.264 인코딩
-                "-preset", "ultrafast",     # 인코딩 속도/압축 밸런스
-                "-crf", "28",            # 품질 (18~28 권장)
-                "-g", "12",              # GOP 길이 = 12
-                "-keyint_min", "12",     # 최소 I-frame 간격
-                "-bf", "0",              # B-frame 제거
-                "-an",                   # 오디오 제거
-                "-y",                    # 출력 덮어쓰기
+                "-i", video_path,
+                "-vf", "fps=6,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",  # 프레임/해상도 정규화
+                "-c:v", "libx264",              # H.264 인코딩
+                "-preset", "ultrafast",         # 속도 우선
+                "-crf", "28",                   # 품질 조정
+                "-pix_fmt", "yuv420p",          # 표준 포맷
+                "-g", "12",                     # GOP 길이 = 12
+                "-keyint_min", "12",            # 최소 I-frame 간격 고정
+                "-bf", "0",                     # B-frame 완전 제거
+                "-x264-params", "scenecut=0:open_gop=0",  # I-frame 강제 주기화
+                "-an",                          # 오디오 제거
+                "-y",
                 output_path
             ]
 
             # 실행
-            subprocess.run(cmd, check=True)
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                check=True
+            )
         video_path = output_path
 
         # -----------------------------
@@ -165,7 +171,6 @@ class MotionVectorProcessor:
         return self.process_in_chunks(all_motions)
     
     def process_in_chunks(self, motions):
-        start = time.time() 
         outs = []
         for i in range(0, len(motions), self.chunk):
             chunk_list = motions[i:i+self.chunk]
@@ -173,8 +178,6 @@ class MotionVectorProcessor:
             outs.append(self.transform_motion(part))
             del part
         torch.cuda.empty_cache()
-        end = time.time() 
-        print(f"Motion processing time: {end - start:.6f}초")
         return torch.cat(outs, dim=0)
         
     def transform_motion(self, motions):
@@ -208,7 +211,6 @@ class ResidualProcessor:
 
     @torch.no_grad()
     def __call__(self, frames, motions_norm, motion_idx, motions_raw=None):
-        start_time = time.time() 
         if not motions_norm or not motion_idx:
             return torch.empty(0, device=self.device, dtype=self.dtype)
 
@@ -262,8 +264,6 @@ class ResidualProcessor:
 
         residuals_all = torch.cat(residual_chunks, dim=0)
         B = len(motions_norm)
-        end = time.time() 
-        print(f"Residual processing time: {end - start_time:.6f}초")
         return residuals_all.view(B, -1, 3, self.height, self.width)
             
 class MotionFeatureExtractor:

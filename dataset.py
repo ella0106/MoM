@@ -1,6 +1,6 @@
-from MoM.utils.utils import *
-from MoM.utils.conversation import conv_templates
-from MoM.processor import MotionVectorExtractor, MotionFeatureExtractor
+from utils.utils import *
+from utils.conversation import conv_templates
+from processor import MotionVectorExtractor, MotionFeatureExtractor
 from transformers import AutoTokenizer
 
 
@@ -24,7 +24,7 @@ class CustomDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_len
         self.conv_template = conv_template
-        self.mve = MotionVectorExtractor()
+        self.mve = MotionVectorExtractor(temp_dir="tmp")
         self.mfe = MotionFeatureExtractor()
 
     def __len__(self):
@@ -41,46 +41,49 @@ class CustomDataset(Dataset):
         cur_sample = self.data[idx]
                      
         video_path = os.path.join(self.video_dir, cur_sample["video"])
-
-        frames, motions_norm, motion_indices, motions_raw, fps = self.mve(video_path)   # 프레임, 모션, 인덱스 추출
-        if frames is None:
-            raise ValueError("Invalid Video")
-        images, motion_feats, residual_feats = self.mfe(frames, motions_norm, motion_indices, motions_raw, fps)
-        
-        question = cur_sample["question"]
-        candidates = cur_sample["candidates"]
-        answer = cur_sample["answer"]
-        candidates_str = " ".join(candidates)
-        question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
-                    f"Question: {question} Options: {candidates_str}\nSelect the best option to answer the question."
-        )
-        prompt = self._build_prompt(question)
-        
-        input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-        prompt_len = len(input_ids)
-        
-        if answer:
-            answer_ids = self.tokenizer(
-                answer + self.tokenizer.eos_token,
-                return_tensors="pt",
-                add_special_tokens=False
-            )["input_ids"][0]
-            input_ids = torch.cat([input_ids, answer_ids], dim=0)
-        input_ids = input_ids[: self.max_length]
-        
-        labels = input_ids.clone()
-        # prompt 부분만 IGNORE_INDEX로 masking
-        # (prompt_text 길이 계산 위해 다시 tokenizer)
-        labels[:prompt_len] = IGNORE_INDEX
-        
-        return {
-            "input_ids": input_ids,
-            "labels": labels,
-            "images" : images,
-            "motion_feats" : motion_feats,
-            "residual_feats" : residual_feats,
-            "modalities" : "video"
-        }
+        try:
+            frames, motions_norm, motion_indices, motions_raw = self.mve(video_path)   # 프레임, 모션, 인덱스 추출
+            if frames is None:
+                raise ValueError("Invalid Video")
+            images, motion_feats, residual_feats = self.mfe(frames, motions_norm, motion_indices, motions_raw)
+            
+            question = cur_sample["question"]
+            candidates = cur_sample["candidates"]
+            answer = cur_sample["answer"]
+            candidates_str = " ".join(candidates)
+            question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
+                        f"Question: {question} Options: {candidates_str}\nSelect the best option to answer the question."
+            )
+            prompt = self._build_prompt(question)
+            
+            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            prompt_len = len(input_ids)
+            
+            if answer:
+                answer_ids = self.tokenizer(
+                    answer + self.tokenizer.eos_token,
+                    return_tensors="pt",
+                    add_special_tokens=False
+                )["input_ids"][0]
+                input_ids = torch.cat([input_ids, answer_ids], dim=0)
+            input_ids = input_ids[: self.max_length]
+            
+            labels = input_ids.clone()
+            # prompt 부분만 IGNORE_INDEX로 masking
+            # (prompt_text 길이 계산 위해 다시 tokenizer)
+            labels[:prompt_len] = IGNORE_INDEX
+            
+            return {
+                "input_ids": input_ids,
+                "labels": labels,
+                "images" : images,
+                "motion_feats" : motion_feats,
+                "residual_feats" : residual_feats,
+                "modalities" : "video"
+            }
+    
+        except Exception as e:
+            print(f"[⚠️ Warning] Index {idx} 처리 중 오류 발생 → 건너뜀 ({e})")
     
 class DataCollatorForCustomDataset:
     def __init__(self, pad_token_id, ignore_index=-100):
@@ -115,12 +118,14 @@ class DataCollatorForCustomDataset:
         
 if __name__ == "__main__":
     dataset = CustomDataset(
-        video_dir='llava/mom/dataset/NExTVideo/',
-        txt='llava/mom/dataset/train.json',
+        video_dir='dataset/NExTVideo/',
+        txt='dataset/train.json',
         tokenizer=AutoTokenizer.from_pretrained("lmms-lab/LLaVA-Video-7B-Qwen2"),
         max_len=1024,
         conv_template="qwen_1_5"
     )
     
-    for item in dataset:
-        print(item['input_ids'][-10:], item['labels'][-10:])
+    for idx, item in enumerate(tqdm(dataset, total=len(dataset[30000:]), desc="Testing Dataset")):
+        if idx < 30000:
+            continue
+        pass

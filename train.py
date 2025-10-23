@@ -1,7 +1,7 @@
-from MoM.utils.utils import *
-from MoM.dataset import CustomDataset, DataCollatorForCustomDataset
-from MoM.builder import get_model
-from MoM.utils.constants import IGNORE_INDEX
+from utils.utils import *
+from dataset import CustomDataset, DataCollatorForCustomDataset
+from builder import get_model
+from utils.constants import IGNORE_INDEX
 from transformers import get_linear_schedule_with_warmup
 amp_dtype = torch.float16
 
@@ -82,14 +82,6 @@ def train(args):
     set_seed(2025)
     tokenizer, model, image_processor, max_length = get_model(args)
     trainable = [p for p in model.parameters() if p.requires_grad]
-    # print("--- Trainable Parameters ---")
-    # total_trainable_params = 0
-    # for name, param in model.named_parameters():
-    #     if param.requires_grad:
-    #         print(f"Layer: {name} | Size: {param.size()} | Num_elems: {param.numel()}")
-    #         total_trainable_params += param.numel()
-
-    # print(f"\nTotal trainable parameters: {total_trainable_params}")
 
     optimizer = torch.optim.AdamW(
         trainable, lr=args.lr, weight_decay=args.weight_decay
@@ -108,7 +100,18 @@ def train(args):
         optimizer=optimizer,
         lr_scheduler=scheduler
     )
+    
+    for name, param in model_engine.module.named_parameters(recurse=True):
+        if "mvresidual" in name or any(k in name for k in ["motion_end", "motion_start", "motion_newline"]):
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
+    trainable_params = [p for p in model_engine.module.parameters(recurse=True) if p.requires_grad]
+    print(f"Total trainable parameters: {sum(p.numel() for p in trainable_params)}")
+
+            
+            
     model_engine.train()
     global_step = 0
 
