@@ -24,7 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import functools
-from .builder import build_vision_projector, build_vision_resampler, build_vision_tower
+from .builder import build_vision_projector, build_vision_tower, build_motion_tower
 import subprocess
 
 from utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
@@ -41,11 +41,12 @@ class LlavaMetaModel:
         if hasattr(config, "mm_vision_tower"):
             delay_load = getattr(config, "delay_load", False)
             self.vision_tower = build_vision_tower(config, delay_load=delay_load)
-            self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
             self.mm_projector = build_vision_projector(config, vision_cfg=self.vision_tower.config)
 
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))
+                
+        self.motion_tower = build_motion_tower()
 
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
@@ -53,6 +54,10 @@ class LlavaMetaModel:
             vision_tower = vision_tower[0]
         return vision_tower
 
+    def get_motion_tower(self):
+        motion_tower = getattr(self, "motion_tower", None)
+        return motion_tower
+   
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
@@ -169,13 +174,11 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
-
-    def get_motion_encoders(self):
-            model = self.get_model()
-            return model.mvresidual
+    
+    def get_motion_tower(self):
+        return self.get_model().get_motion_tower()
 
     def get_2dPool(self, image_feature, stride=2):
-        # print("Pooling mode:", self.config.mm_spatial_pool_mode)
         height = width = self.get_vision_tower().num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
         image_feature = image_feature.view(num_frames, height, width, -1)
@@ -197,25 +200,17 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
-        # image_features = self.get_model().vision_resampler(image_features, images=images)
-        image_features = image_features.to(self.get_model().mm_projector[0].weight.dtype)
-        image_features = self.get_model().mm_projector(image_features)
+        image_features = self.get_model().mm_projector(images)
         return image_features
     
-    def encode_residuals(self, residuals):
-        residuals = residuals.to(self.get_model().mm_projector[0].weight.dtype)
-        residuals = self.get_model().mm_projector(residuals)
-        return residuals
-   
     def add_token_per_grid(self, image_feature):
         resize_h = int(math.sqrt(image_feature.shape[1]))
         num_frames = image_feature.shape[0]
         feature_dim = image_feature.shape[-1]
 
-        image_feature = image_feature.view(num_frames, 1, resize_h, resize_h, -1) # (F, 1, h, w, D)
-        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous() # (D, F, h, 1, w)
-        image_feature = image_feature.flatten(1, 2).flatten(2, 3) # (D, F*h, w)
+        image_feature = image_feature.view(num_frames, 1, resize_h, resize_h, -1)
+        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+        image_feature = image_feature.flatten(1, 2).flatten(2, 3)
         image_feature = torch.cat((image_feature, self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
         if getattr(self.config, "add_faster_video", False):
             # import pdb; pdb.set_trace()
@@ -228,7 +223,7 @@ class LlavaMetaForCausalLM(ABC):
             # import pdb; pdb.set_trace()
             return image_feature
         # import pdb; pdb.set_trace()
-        image_feature = image_feature.flatten(1, 2).transpose(0, 1) # (F*(h+1), w, D)
+        image_feature = image_feature.flatten(1, 2).transpose(0, 1)
         return image_feature
 
     def add_token_per_frame(self, image_feature):
@@ -239,47 +234,26 @@ class LlavaMetaForCausalLM(ABC):
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, motion_feats, residual_feats, modalities=["image"], image_sizes=None):
         vision_tower = self.get_vision_tower()
-        
-        mvresidual = self.get_motion_encoders()
-        if type(motion_feats) != list:
-            motion_feats = [motion_feats]
-            residual_feats = [residual_feats]
-        
-        new_motion_features = []
-        for i, item in enumerate(motion_feats):
-            motion_features = mvresidual(motion_feats[i], residual_feats[i])
-            motion_features = self.encode_residuals(motion_features)
-            N, T, H = motion_features.shape
-            # print("motion feature shape:", motion_features.shape)
-            
-            newline = self.get_model().motion_newline.to(device=motion_features.device, dtype=motion_features.dtype)[None, None, :]
-            newline = newline.expand(N, 1, H)  # (B, 1, H)
-            
-            motion_with_frame_sep = []
-            for t in range(T):
-                motion_with_frame_sep.append(motion_features[:, t:t+1, :])  # (B, 1, H)
-                motion_with_frame_sep.append(newline)     # (B, 1, H)
+        motion_tower = self.get_motion_tower()
+        frame_num = 64
 
-            motion_with_frame_sep = torch.cat(motion_with_frame_sep, dim=1)  # (B, T*2, H)
-            
-            # --- 모션 시작/끝 토큰 삽입 ---
-            motion_start = self.get_model().motion_start.to(device=motion_features.device, dtype=motion_features.dtype)[None, None, :].expand(N, 1, H)
-            motion_end = self.get_model().motion_end.to(device=motion_features.device, dtype=motion_features.dtype)[None, None, :].expand(N, 1, H)
-            motion_features = torch.cat([motion_start, motion_with_frame_sep, motion_end], dim=1)
-            motion_features = motion_features.reshape(-1, H)
-            new_motion_features.append(motion_features)
-        
-        # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
         if isinstance(modalities, str):
             modalities = [modalities]
 
-        # import pdb; pdb.set_trace()
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+            
+            for idx, img in enumerate(images):
+                if img.shape[0] > frame_num:
+                    step = img.shape[0] / frame_num
+                    selected_indices = torch.floor(torch.arange(0, img.shape[0], step)).long()[:frame_num]
+                    images[idx] = img[selected_indices]
+                    motion_feats[idx] = motion_feats[idx][selected_indices]
+                    residual_feats[idx] = residual_feats[idx][selected_indices]
 
             video_idx_in_batch = []
             for _ in range(len(modalities)):
@@ -295,74 +269,55 @@ class LlavaMetaForCausalLM(ABC):
 
             concat_images = torch.cat([image for image in images_list], dim=0)
             split_sizes = [image.shape[0] for image in images_list]
-            encoded_image_features = self.encode_images(concat_images)
-
-            # This is a list, each element is [num_images, patch * patch, dim]
-            # rank_print(f"Concat images : {concat_images.shape}")
-            # rank_print("encoded_image_features shape:", encoded_image_features.shape)
-            encoded_image_features = torch.split(encoded_image_features, split_sizes)
-            
-            image_features = []
-            for idx, image_feat in enumerate(encoded_image_features):
-                # print("image_feat shape:", image_feat.shape, idx)
+            image_features = vision_tower(concat_images).detach()
+            encoded_image_features = self.encode_images(image_features).detach()
+            split_image_features = torch.split(encoded_image_features, split_sizes, dim=0)
+            pooled_features = []
+            for idx, image_feat in enumerate(split_image_features):
                 if idx in video_idx_in_batch:
-                    image_features.append(self.get_2dPool(image_feat))
+                    pooled_features.append(self.get_2dPool(image_feat))
                 else:
-                    image_features.append(image_feat)
-            # rank_print(f"Encoded image feats : {[x.shape for x in image_features]}")
-            mm_patch_merge_type = getattr(self.config, "mm_patch_merge_type", "flat")
-            image_aspect_ratio = getattr(self.config, "image_aspect_ratio", "square")
-            mm_newline_position = getattr(self.config, "mm_newline_position", "one_token")
+                    pooled_features.append(image_feat)
+            
+            motion_features = []
+            for m, r in zip(motion_feats, residual_feats):
+                motion_feature = motion_tower(m, r)
+                motion_features.append(motion_feature)
+            concat_motion_features = torch.cat([mf for mf in motion_features], dim=0)
+            motion_split_sizes = [mf.shape[0] for mf in motion_features]
+            encoded_motion_features = self.encode_images(concat_motion_features)
+            split_motion_features = torch.split(encoded_motion_features, motion_split_sizes, dim=0)
+    
+            encoded_image_features = []
+            for img, mot in zip(pooled_features, split_motion_features):
+                combined_feats = []
+                for i in range(len(mot)):
+                    combined = torch.cat([img[i].detach(), mot[i]], dim=0)
+                    combined_feats.append(combined)
+                encoded_image_features.append(torch.stack(combined_feats, dim=0))
+                
+            print("encoded_image_features.requires_grad:", encoded_image_features[0].requires_grad)
+                
+        else:
+            image_features = vision_tower(images).detach()
+            encoded_image_features = self.encode_images(image_features).detach()
+            motion_features = motion_tower(motion_feats, residual_feats)
+            encoded_motion_features = self.encode_images(motion_features)
 
-            if mm_patch_merge_type == "flat":
-                image_features = [x.flatten(0, 1) for x in image_features]
+            combined_feats = []
+            for i in range(len(encoded_image_features)):
+                combined = torch.cat([encoded_image_features[i].detach(), encoded_motion_features[i]], dim=0)
+                combined_feats.append(combined)
+            encoded_image_features = [torch.stack(combined_feats, dim=0)]    
+                
+        image_features = [x.flatten(0, 1) for x in encoded_image_features]
 
-            elif mm_patch_merge_type.startswith("spatial"):
-                new_image_features = []
-                for image_idx, image_feature in enumerate(image_features):
-                    # FIXME: now assume the image is square, and split to 2x2 patches
-                    # num_patches = h * w, where h = w = sqrt(num_patches)
-                    # currently image_feature is a tensor of shape (4, num_patches, hidden_size)
-                    # we want to first unflatten it to (2, 2, h, w, hidden_size)
-                    # rank0_print("At least we are reaching here")
-                    # import pdb; pdb.set_trace()
-                    if image_idx in video_idx_in_batch:  # video operations
-                        # rank0_print("Video")
-                        if mm_newline_position == "grid":
-                            # Grid-wise
-                            image_feature = self.add_token_per_grid(image_feature)
-                            # print(image_feature.shape)
-                            new_image_features.append(image_feature)
-                        elif mm_newline_position == "frame":
-                            # Frame-wise
-                            image_feature = self.add_token_per_frame(image_feature)
-
-                            new_image_features.append(image_feature.flatten(0, 1))
-                        else:
-                            raise ValueError(f"Unexpected mm_newline_position: {mm_newline_position}")
-                    
-                    else:  # single image operations
-                        image_feature = image_feature[0]
-                        if "unpad" in mm_patch_merge_type:
-                            image_feature = torch.cat((image_feature, self.model.image_newline[None]), dim=0)
-
-                        new_image_features.append(image_feature)
-                image_features = new_image_features
-            else:
-                raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
-        else: # 이미지가 하나 일 때
-            image_features = self.encode_images(images)
+        # print([x.shape for x in image_features])
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(self.config, "mm_use_im_start_end", False):
             raise NotImplementedError
-        # rank_print(f"Total images : {len(image_features)}")
-
-        # Let's just add dummy tensors if they do not exist,
-        # it is a headache to deal with None all the time.
-        # But it is not ideal, and if you have a better idea,
-        # please open an issue / submit a PR, thanks.
-        
+ 
         _labels = labels
         _position_ids = position_ids
         _attention_mask = attention_mask
@@ -376,7 +331,7 @@ class LlavaMetaForCausalLM(ABC):
             labels = torch.full_like(input_ids, IGNORE_INDEX)
 
         # remove the padding using attention_mask -- FIXME
-        cur_input_ids = input_ids
+        _input_ids = input_ids
         input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)]
         labels = [cur_labels[cur_attention_mask] for cur_labels, cur_attention_mask in zip(labels, attention_mask)]
 
@@ -415,18 +370,14 @@ class LlavaMetaForCausalLM(ABC):
                 if i < num_images:
                     try:
                         cur_image_features = image_features[cur_image_idx]
-                        cur_motion_features = new_motion_features[cur_image_idx]
                     except IndexError:
                         cur_image_features = image_features[cur_image_idx - 1]
-                        cur_motion_features = new_motion_features[cur_image_idx - 1]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
-                    cur_new_input_embeds.append(cur_motion_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-                    cur_new_labels.append(torch.full((cur_motion_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
-            print([x.shape for x in cur_new_input_embeds])
+            # print([x.shape for x in cur_new_input_embeds])
 
             # import pdb; pdb.set_trace()
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
@@ -437,6 +388,7 @@ class LlavaMetaForCausalLM(ABC):
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, "tokenizer_model_max_length", None)
+        # rank_print("Finishing Inserting")
 
         new_input_embeds = [x[:tokenizer_model_max_length] for x, modality in zip(new_input_embeds, modalities)]
         new_labels = [x[:tokenizer_model_max_length] for x, modality in zip(new_labels, modalities)]
@@ -453,6 +405,7 @@ class LlavaMetaForCausalLM(ABC):
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
+        # rank0_print("Prepare pos id")
 
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
             cur_len = cur_new_embed.shape[0]
@@ -470,6 +423,7 @@ class LlavaMetaForCausalLM(ABC):
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+        # rank0_print("tokenizer padding")
 
         if _labels is None:
             new_labels = None
@@ -493,45 +447,3 @@ class LlavaMetaForCausalLM(ABC):
         # import pdb; pdb.set_trace()
         # rank0_print("Finish preparing")
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
-
-    def initialize_vision_tokenizer(self, model_args, tokenizer):
-        if model_args.mm_use_im_patch_token:
-            tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-        if model_args.mm_use_im_start_end:
-            num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-            if num_new_tokens > 0:
-                input_embeddings = self.get_input_embeddings().weight.data
-                output_embeddings = self.get_output_embeddings().weight.data
-
-                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-                output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-
-                input_embeddings[-num_new_tokens:] = input_embeddings_avg
-                output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = True
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
-
-            if model_args.pretrain_mm_mlp_adapter:
-                mm_projector_weights = torch.load(model_args.pretrain_mm_mlp_adapter, map_location="cpu")
-                embed_tokens_weight = mm_projector_weights["model.embed_tokens.weight"]
-                assert num_new_tokens == 2
-                if input_embeddings.shape == embed_tokens_weight.shape:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight[-num_new_tokens:]
-                elif embed_tokens_weight.shape[0] == num_new_tokens:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight
-                else:
-                    raise ValueError(f"Unexpected embed_tokens_weight shape. Pretrained: {embed_tokens_weight.shape}. Current: {input_embeddings.shape}. Numer of new tokens: {num_new_tokens}.")
-        elif model_args.mm_use_im_patch_token:
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = False
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False

@@ -42,7 +42,7 @@ class CustomDataset(Dataset):
                      
         video_path = os.path.join(self.video_dir, cur_sample["video"])
         try:
-            frames, motions_norm, motion_indices, motions_raw = self.mve(video_path)   # 프레임, 모션, 인덱스 추출
+            frames, motions_norm, motion_indices, motions_raw = self.mve(self.video_dir, cur_sample["video"])   # 프레임, 모션, 인덱스 추출
             if frames is None:
                 raise ValueError("Invalid Video")
             images, motion_feats, residual_feats = self.mfe(frames, motions_norm, motion_indices, motions_raw)
@@ -83,7 +83,9 @@ class CustomDataset(Dataset):
             }
     
         except Exception as e:
-            print(f"[⚠️ Warning] Index {idx} 처리 중 오류 발생 → 건너뜀 ({e})")
+            print(f"[⚠️ Warning] Index {idx} Video : {video_path} 처리 중 오류 발생 → 건너뜀 ({e})")
+            next_idx = (idx + 1) % len(self.data)
+            return self.__getitem__(next_idx)
     
 class DataCollatorForCustomDataset:
     def __init__(self, pad_token_id, ignore_index=-100):
@@ -91,6 +93,10 @@ class DataCollatorForCustomDataset:
         self.ignore_index = ignore_index
 
     def __call__(self, batch):
+        batch = [b for b in batch if b is not None]
+        if len(batch) == 0:
+            return None
+        
         max_len = max(len(b["input_ids"]) for b in batch)
         input_ids = torch.full((len(batch), max_len), self.pad_token_id, dtype=torch.long)
         labels = torch.full((len(batch), max_len), self.ignore_index, dtype=torch.long)
@@ -119,13 +125,12 @@ class DataCollatorForCustomDataset:
 if __name__ == "__main__":
     dataset = CustomDataset(
         video_dir='dataset/NExTVideo/',
+        temp_dir='tmp/',
         txt='dataset/train.json',
         tokenizer=AutoTokenizer.from_pretrained("lmms-lab/LLaVA-Video-7B-Qwen2"),
-        max_len=1024,
+        max_len=10024,
         conv_template="qwen_1_5"
     )
     
-    for idx, item in enumerate(tqdm(dataset, total=len(dataset[30000:]), desc="Testing Dataset")):
-        if idx < 30000:
-            continue
-        pass
+    for idx in tqdm(range(20000, 30000)):
+        sample = dataset[idx]
