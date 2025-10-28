@@ -23,21 +23,24 @@ class MotionVectorExtractor:
         self.transcode_height = transcode_height  # None이면 원본 해상도 유지
         self.mb = mb_size
 
-    def __call__(self, video_path):
+    def __call__(self, folder_path, video_path):
         try:
-            frames, motion_sequences, motion_indices, motion_raws = self.sample_video_clips(video_path)
+            frames, motion_sequences, motion_indices, motion_raws = self.sample_video_clips(folder_path, video_path)
             return frames, motion_sequences, motion_indices, motion_raws
         except Exception as e:
             raise ValueError(f"load video motion error {e}")
     
-    def extract_motions(self, video_path):
-        output_path = os.path.join(self.temp_dir, f"transcoded_{os.path.basename(video_path)}")
+    def extract_motions(self, folder_path, video_path):
+        org_path = os.path.join(folder_path, video_path)
+        output_path = os.path.join(self.temp_dir, video_path)
         if os.path.exists(output_path):
             pass
         else:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             cmd = [
                 "ffmpeg",
-                "-i", video_path,
+                "-loglevel", "error",
+                "-i", org_path,
                 "-vf", "fps=6,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",  # 프레임/해상도 정규화
                 "-c:v", "libx264",              # H.264 인코딩
                 "-preset", "ultrafast",         # 속도 우선
@@ -96,8 +99,8 @@ class MotionVectorExtractor:
             motions.append((mv_norm, mv_raw))
         return frames, motions, frame_types
                 
-    def sample_video_clips(self, video_path):
-        frames, motions, frame_types = self.extract_motions(video_path)
+    def sample_video_clips(self, folder_path, video_path):
+        frames, motions, frame_types = self.extract_motions(folder_path, video_path)
         p_frames = self.sample_p_indices(frame_types)
 
         clips_norm, clips_raw = [], []
@@ -151,7 +154,7 @@ class MotionVectorExtractor:
         return data
 
 class MotionVectorProcessor:
-    def __init__(self, width=224, height=224, device=None, dtype=torch.float16, chunk=4):
+    def __init__(self, width=384, height=384, device=None, dtype=torch.float16, chunk=4):
         self.target_size = (height, width)
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -198,7 +201,7 @@ class MotionVectorProcessor:
             return motions.view(B, T, C, self.target_size[0], self.target_size[1])
         
 class ResidualProcessor:
-    def __init__(self, frame_num=12, height=224, width=224,
+    def __init__(self, frame_num=12, height=384, width=384,
                  device=None, dtype=torch.float16, chunk=4,
                  warp_ratio=1.0):   # 1.0=풀해상도, 0.75=절충, 0.5=스피드
         self.frame_num = frame_num
@@ -267,7 +270,7 @@ class ResidualProcessor:
         return residuals_all.view(B, -1, 3, self.height, self.width)
             
 class MotionFeatureExtractor:
-    def __init__(self, width=224, height=224, frame_num=12, device=None, dtype=torch.float16):
+    def __init__(self, width=384, height=384, frame_num=12, device=None, dtype=torch.float16):
         self.motion_processor = MotionVectorProcessor(width=width, height=height, device=device, dtype=dtype)
         self.residual_processor = ResidualProcessor(frame_num=frame_num, height=height, width=width,
                                                     device=device, dtype=dtype)
@@ -283,7 +286,7 @@ class MotionFeatureExtractor:
         motion_feat = self.motion_processor(motions_norm)                       # [B,T,2,H,W]
         residual_feat = self.residual_processor(frames, motions_norm, motion_indices, motions_raw)  # [B,T,3,H,W]
 
-        rgb_pick = [frames[i] for i in range(0, len(frames), 6)]
+        rgb_pick = [frames[i] for i in range(0, len(frames), self.frame_num)]
         if len(rgb_pick) > 0:
             rgb_np = np.stack(rgb_pick)                         # [N,H,W,3]
             rgb = torch.from_numpy(rgb_np).to(self.device, dtype=torch.float32)

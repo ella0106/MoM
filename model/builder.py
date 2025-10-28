@@ -3,6 +3,7 @@ import torch.nn as nn
 import re
 import os
 from .siglip_encoder import SigLipVisionTower
+from .encoder import MVResidualModel
 
 class IdentityMap(torch.nn.Module):
     def __init__(self):
@@ -15,13 +16,6 @@ class IdentityMap(torch.nn.Module):
     def config(self):
         return {"mm_resampler_type": None}
 
-
-def build_vision_resampler(model_args, delay_load=False, **kwargs):
-    resampler_type = getattr(model_args, "mm_resampler_type", None)
-    if resampler_type is None:
-        return IdentityMap()
-
-    raise ValueError(f"Unknown resampler type: {resampler_type}")
 
 def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, "mm_projector_type", "linear")
@@ -41,11 +35,8 @@ def build_vision_projector(config, delay_load=False, **kwargs):
     raise ValueError(f"Unknown projector type: {projector_type}")
 
 def build_vision_tower(vision_tower_cfg, **kwargs):
-    vision_tower = getattr(vision_tower_cfg, "mm_vision_tower", getattr(vision_tower_cfg, "vision_tower", None))
-    is_absolute_path_exists = os.path.exists(vision_tower)
-    use_s2 = getattr(vision_tower_cfg, "s2", False)
-    if "siglip" in vision_tower:
-        return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+    vision_tower = "google/siglip-so400m-patch14-384"
+    return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
 
-    raise ValueError(f"Unknown vision tower: {vision_tower}")
-
+def build_motion_tower():
+    return MVResidualModel()

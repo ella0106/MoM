@@ -6,3 +6,4 @@ results/
 tmp/
 scripts/
 checkpoints/
+wandb/
