@@ -12,7 +12,7 @@ class CustomDataset(Dataset):
         self.conv_template = conv_template
         self.mve = MotionVectorExtractor(temp_dir=temp_dir)
         self.mfe = MotionFeatureExtractor()
-        sefl.train = train
+        self.train = train
 
     def __len__(self):
         return len(self.data)
@@ -34,25 +34,25 @@ class CustomDataset(Dataset):
                 raise ValueError("Invalid Video")
             images, motion_feats, residual_feats = self.mfe(frames, motions_norm, motion_indices, motions_raw)
             
-            question = cur_sample["question"]
-            candidates = cur_sample["candidates"]
-            answer = cur_sample["answer"]
-            candidates_str = " ".join(candidates)
-            question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
-                        f"Question: {question} Options: {candidates_str}\nSelect the best option to answer the question."
-            )
-            prompt = self._build_prompt(question)
+            if "next" in self.video_dir.lower():
+                prompt, label = self.process_nextqa(cur_sample)
+            if "anet" in self.video_dir.lower():
+                prompt, label = self.process_anet_base(cur_sample)
+                # prompt, label, timestamp = self.process_anet_caption(cur_sample)
+                # start, end = timestamp
+                # frames, motion_feats, residual_feats = frames[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
             
+            prompt = self._build_prompt(prompt)
             input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             prompt_len = len(input_ids)
             
             if self.train:
-                answer_ids = self.tokenizer(
-                    answer + self.tokenizer.eos_token,
+                label_ids = self.tokenizer(
+                    label + self.tokenizer.eos_token,
                     return_tensors="pt",
                     add_special_tokens=False
                 )["input_ids"][0]
-                input_ids = torch.cat([input_ids, answer_ids], dim=0)
+                input_ids = torch.cat([input_ids, label_ids], dim=0)
                 input_ids = input_ids[: self.max_length]
             
             labels = input_ids.clone()
@@ -72,6 +72,36 @@ class CustomDataset(Dataset):
             print(f"[⚠️ Warning] Index {idx} Video : {video_path} 처리 중 오류 발생 → 건너뜀 ({e})")
             next_idx = (idx + 1) % len(self.data)
             return self.__getitem__(next_idx)
+  
+    def process_nextqa(self, cur_sample):
+        question = cur_sample["question"]
+        candidates = cur_sample["candidates"]
+        answer = cur_sample["answer"]
+        candidates_str = " ".join(candidates)
+        question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
+                    f"Question: {question} Options: {candidates_str}\nSelect the best option to answer the question."
+        )
+        return question, answer
+    
+    def process_anet_caption(self, cur_sample):
+        question = "The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. \
+                    Describe the content of the video."
+        answer = cur_sample["sentence"]
+        
+        def floor_even(t):
+            t_floor = math.floor(t)
+            return t_floor if t_floor % 2 == 0 else t_floor - 1
+        
+        timestamp = [floor_even(x) for x in cur_sample['timestamp']]
+
+        return question, answer, timestamp
+    
+    def process_anet_base(self, cur_sample):
+        question = "q"
+        answer = "answer"
+        return question, answer
+        
+        
     
 class DataCollatorForCustomDataset:
     def __init__(self, pad_token_id, ignore_index=-100, train=True):
@@ -124,13 +154,11 @@ if __name__ == "__main__":
     dataset = CustomDataset(
         video_dir='dataset/Anet/',
         temp_dir='tmp/',
-        txt='dataset/train.json',
+        txt='dataset/captions/train_vids.json',
         tokenizer=AutoTokenizer.from_pretrained("lmms-lab/LLaVA-Video-7B-Qwen2"),
-        max_len=10024,
+        max_len=1024,
         conv_template="qwen_1_5"
     )
     
     for idx in tqdm(range(len(dataset))):
-        if idx < 32100:
-            continue
         sample = dataset[idx]

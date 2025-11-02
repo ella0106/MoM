@@ -315,7 +315,7 @@ if __name__ == "__main__":
     images, motion_feats, residual_feats = mfe(frames, motions_norm, motion_indices, motions_raw)     # RGB + Motion + Residual feature 묶기
     
     print("===== Test Result =====")
-    print("RGB feature    :", images.shape)       # [H, W, T]
+    print("RGB feature    :", images.shape)       # [B, H, W]
     print("Motion feature :", motion_feats.shape)    # [B, 2, T, H, W]
     print("Residual feature:", residual_feats.shape) # [B, 3, T, H, W]
     final = time.time() 

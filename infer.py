@@ -16,6 +16,7 @@ def infer(args):
     
     model.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    rank0_print(f"{device} is available.")
     model.to(device)
     
     rank0_print(f"Model loaded: {args.model_path}")
@@ -52,8 +53,10 @@ def infer(args):
     results = {}
     
     skip = args.skip
-    skip_len = args.skip_len
-    subset = Subset(loader.dataset, range(skip, skip+skip_len))
+    skip_len = skip + args.skip_len
+    if args.skip_len == 0:
+        skip_len = len(dataset)
+    subset = Subset(loader.dataset, range(skip, skip_len))
     loader = DataLoader(
         subset,
         batch_size=loader.batch_size,
