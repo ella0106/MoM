@@ -1,76 +1,42 @@
 from utils.utils import *
+from transformers import AutoTokenizer, GenerationConfig
 from dataset import CustomDataset, DataCollatorForCustomDataset
-from builder import load_pretrained_model
-from utils.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IGNORE_INDEX
-from utils.conversation import conv_templates
-from transformers import GenerationConfig
+from model.llava_qwen_mom import LlavaQwenMomForCausalLM
 
-def to_device(batch, device):
-    """
-    배치를 주어진 device로 안전하게 이동.
-    input_ids, labels, attention_mask, images만 사용.
-    (motion_feats, residual_feats는 현재 모델 시그니처상 전달하지 않음)
-    """
-    out = {}
-    for k, v in batch.items():
-        if torch.is_tensor(v):
-            # 멀티모달 텐서는 AMP dtype으로
-            if k in ("images", "motion_feats", "residual_feats"):
-                out[k] = v.to(device=device, dtype=amp_dtype, non_blocking=True)
-            else:
-                out[k] = v.to(device=device, non_blocking=True)
-        else:
-            out[k] = v
-    return out
-
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # 멀티 GPU일 경우
-    # cudnn 관련 설정
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    # 환경 변수 (일부 라이브러리에서 사용)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-
-    print(f"[Seed fixed to {seed}]")
-
-# 예시
-set_seed(2025)
-
-def main(args):
-    model_name = args.model_path
-    model_type = "llava_qwen_mom"
-    device = "cuda"
-    device_map = "auto"
-    tokenizer, model, image_processor, max_length = load_pretrained_model(model_name, None, model_type, torch_dtype="float16", device_map=device_map)  # Add any other thing you want to pass in llava_model_args
+def infer(args):
+    rank0_print("Loading model for inference...")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    model = LlavaQwenMomForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=False, 
+        # quantization_config=bnbconfig,
+    )
+    max_length = model.config.max_position_embeddings
+    
     model.eval()
-
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
     
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if torch.isnan(param).any():
-                print(f"[NaN Fix] {name} contained NaN → replaced with 0")
-                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=0.0, neginf=0.0)
-    
+    rank0_print(f"Model loaded: {args.model_path}")
+    rank0_print(f"Max length: {max_length}")
     
     dataset = CustomDataset(
         video_dir=args.video_dir,
         txt=args.dataset,
+        temp_dir=args.temp_dir,
         tokenizer=tokenizer,
         max_len=max_length,
-        conv_template="qwen_1_5"
+        conv_template="qwen_1_5",
+        train=False
     )
     
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    collator = DataCollatorForCustomDataset(pad_token_id=pad_id, ignore_index=IGNORE_INDEX)
+    collator = DataCollatorForCustomDataset(pad_token_id=pad_id, ignore_index=IGNORE_INDEX, train=False)
     
     loader = DataLoader(
         dataset,
-        batch_size=1,  # DS에서 실제 마이크로 배치는 config로도 관리됨
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
         pin_memory=False,
@@ -84,13 +50,24 @@ def main(args):
     )
     
     results = {}
-    for i, batch in enumerate(tqdm(loader)):
-        batch = to_device(batch, model.device)
-        if batch["input_ids"].dim() == 3 and batch["input_ids"].size(0) == 1:
-                batch["input_ids"] = batch["input_ids"].squeeze(0)
-                batch["labels"] = batch["labels"].squeeze(0)
-                batch["attention_mask"] = batch["attention_mask"].squeeze(0)
-        
+    
+    skip = args.skip
+    skip_len = args.skip_len
+    subset = Subset(loader.dataset, range(skip, skip+skip_len))
+    loader = DataLoader(
+        subset,
+        batch_size=loader.batch_size,
+        shuffle=False,
+        num_workers=loader.num_workers,
+        collate_fn=loader.collate_fn,
+    )
+
+    for i, batch in enumerate(tqdm(loader, desc=f"Running inference")):
+        i += skip
+        for k in batch:
+            if isinstance(batch[k], torch.Tensor):
+                batch[k] = batch[k].to(device)
+              
         cont = model.generate(
             inputs=batch["input_ids"],
             images=batch["images"],
@@ -101,10 +78,11 @@ def main(args):
         )
         output = tokenizer.decode(cont[0], skip_special_tokens=True)
         results.update({i : output})
-        if i % 10 == 0:
+        if (i+1) % 10 == 0:
             save_file([results], args.result_path)
     
     save_file([results], args.result_path)
+    rank0_print(f"Inference completed ✅ Results saved to: {args.result_path}")
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -112,10 +90,15 @@ if __name__ == "__main__":
     # parser.add_argument('--modal-type', choices=["a", "v", "av"], help='', required=True)
     parser = argparse.ArgumentParser()
     parser.add_argument('--model-path', type=str, required=True, help='pretrained model path')
+    parser.add_argument('--tokenizer-path', type=str, required=True, help='tokenizer path')
     parser.add_argument('--video-dir', type=str, required=True, help='video directory')
     parser.add_argument('--dataset', type=str, required=True, help='json dataset file')
     parser.add_argument('--result-path', type=str, required=True, help='json dataset file')
-
+    parser.add_argument('--batch_size', type=int, default=1, help='batch size for inference')
+    parser.add_argument("--temp_dir", type=str, default="tmp")
+    parser.add_argument("--skip", type=int, default=0)
+    parser.add_argument("--skip_len", type=int, default=1000)
+    
     args = parser.parse_args()
     
-    main(args)
+    infer(args)

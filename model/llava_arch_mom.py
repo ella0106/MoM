@@ -296,7 +296,7 @@ class LlavaMetaForCausalLM(ABC):
                     combined_feats.append(combined)
                 encoded_image_features.append(torch.stack(combined_feats, dim=0))
                 
-            print("encoded_image_features.requires_grad:", encoded_image_features[0].requires_grad)
+            # print("encoded_image_features.requires_grad:", encoded_image_features[0].requires_grad)
                 
         else:
             image_features = vision_tower(images).detach()

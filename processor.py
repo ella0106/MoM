@@ -23,15 +23,15 @@ class MotionVectorExtractor:
         self.transcode_height = transcode_height  # None이면 원본 해상도 유지
         self.mb = mb_size
 
-    def __call__(self, folder_path, video_path):
+    def __call__(self, video_path):
         try:
-            frames, motion_sequences, motion_indices, motion_raws = self.sample_video_clips(folder_path, video_path)
+            frames, motion_sequences, motion_indices, motion_raws = self.sample_video_clips(video_path)
             return frames, motion_sequences, motion_indices, motion_raws
         except Exception as e:
             raise ValueError(f"load video motion error {e}")
     
-    def extract_motions(self, folder_path, video_path):
-        org_path = os.path.join(folder_path, video_path)
+    def extract_motions(self, video_path):
+        org_path = video_path
         output_path = os.path.join(self.temp_dir, video_path)
         if os.path.exists(output_path):
             pass
@@ -99,8 +99,8 @@ class MotionVectorExtractor:
             motions.append((mv_norm, mv_raw))
         return frames, motions, frame_types
                 
-    def sample_video_clips(self, folder_path, video_path):
-        frames, motions, frame_types = self.extract_motions(folder_path, video_path)
+    def sample_video_clips(self, video_path):
+        frames, motions, frame_types = self.extract_motions(video_path)
         p_frames = self.sample_p_indices(frame_types)
 
         clips_norm, clips_raw = [], []

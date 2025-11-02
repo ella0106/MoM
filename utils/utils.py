@@ -20,7 +20,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, random_split, DistributedSampler, Subset
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 torch.backends.cudnn.benchmark = True

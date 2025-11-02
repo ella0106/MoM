@@ -8,8 +8,9 @@ def train(args):
     rank0_print("Visible GPUs:", os.environ.get("CUDA_VISIBLE_DEVICES"))
 
     tokenizer, model, max_length = get_model(args)
-    
-    model.gradient_checkpointing_enable()
+    model.train()
+    model.gradient_checkpointing_enable({"use_reentrant": False})
+    model.config.use_reentrant = False  
     
     trainable = [p for p in model.parameters() if p.requires_grad]
     rank0_print(f"Trainable params: {sum(p.numel() for p in trainable)/1e6:.2f}M")
@@ -39,9 +40,9 @@ def train(args):
         logging_steps=args.log_steps,
         dataloader_num_workers=args.num_workers,
         dataloader_pin_memory=False,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
     )
-    
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -55,7 +56,7 @@ def train(args):
     else:
         trainer.train()
     
-    
+    trainer.save_model(args.output_dir)    
     
         
 if __name__ == "__main__":
