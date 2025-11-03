@@ -37,10 +37,9 @@ class CustomDataset(Dataset):
             if "next" in self.video_dir.lower():
                 prompt, label = self.process_nextqa(cur_sample)
             if "anet" in self.video_dir.lower():
-                prompt, label = self.process_anet_base(cur_sample)
-                # prompt, label, timestamp = self.process_anet_caption(cur_sample)
-                # start, end = timestamp
-                # frames, motion_feats, residual_feats = frames[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
+                prompt, label, timestamp = self.process_anet_caption(cur_sample)
+                start, end = timestamp
+                images, motion_feats, residual_feats = images[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
             
             prompt = self._build_prompt(prompt)
             input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
@@ -92,7 +91,7 @@ class CustomDataset(Dataset):
             t_floor = math.floor(t)
             return t_floor if t_floor % 2 == 0 else t_floor - 1
         
-        timestamp = [floor_even(x) for x in cur_sample['timestamp']]
+        timestamp = [floor_even(x)//2 for x in cur_sample['timestamp']]
 
         return question, answer, timestamp
     
