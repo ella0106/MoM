@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 class CustomDataset(Dataset):
     def __init__(self, video_dir, txt, temp_dir, tokenizer=None, max_len=None, conv_template=None, train=True):
         self.video_dir = video_dir
+        self.data_name = txt
         self.data = load_file(txt)
         self.tokenizer = tokenizer
         self.max_length = max_len
@@ -37,10 +38,13 @@ class CustomDataset(Dataset):
             if "next" in self.video_dir.lower():
                 prompt, label = self.process_nextqa(cur_sample)
             if "anet" in self.video_dir.lower():
-                prompt, label, timestamp = self.process_anet_caption(cur_sample)
-                start, end = timestamp
-                images, motion_feats, residual_feats = images[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
-            
+                if "caption" in self.data_name.lower():
+                    prompt, label, timestamp = self.process_anet_caption(cur_sample)
+                    start, end = timestamp
+                    images, motion_feats, residual_feats = images[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
+                if "qa" in self.data_name.lower():
+                    prompt, label = self.process_anet_qa(cur_sample)
+
             prompt = self._build_prompt(prompt)
             input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             prompt_len = len(input_ids)
@@ -95,13 +99,14 @@ class CustomDataset(Dataset):
 
         return question, answer, timestamp
     
-    def process_anet_base(self, cur_sample):
-        question = "q"
-        answer = "answer"
+    def process_anet_qa(self, cur_sample):
+        question = cur_sample['question']
+        question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
+                    f"Question: {question} \nAnswer the question breifly."
+        )
+        answer = cur_sample['answer']
         return question, answer
         
-        
-    
 class DataCollatorForCustomDataset:
     def __init__(self, pad_token_id, ignore_index=-100, train=True):
         self.pad_token_id = pad_token_id
@@ -148,6 +153,88 @@ class DataCollatorForCustomDataset:
             "residual_feats" : residual_feats,
             "modalities" : modalities,
         }
+        
+class BaseDataset(Dataset):
+    def __init__(self, video_dir, txt, temp_dir, tokenizer=None, max_len=None, conv_template=None, image_processor=None):
+        self.video_dir = video_dir
+        self.data_name = txt
+        self.data = load_file(txt)
+        self.tokenizer = tokenizer
+        self.max_length = max_len
+        self.conv_template = conv_template
+        self.image_processor = image_processor
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def _build_prompt(self, question, video, frame_time, video_time):
+        time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {len(video[0])} frames are uniformly sampled from it. These frames are located at {frame_time}.Please answer the following questions related to this video."
+        question = DEFAULT_IMAGE_TOKEN + f"{time_instruciton}\n{question}"
+        conv = copy.deepcopy(conv_templates[self.conv_template])
+        conv.append_message(conv.roles[0], question)
+        conv.append_message(conv.roles[1], None)
+        return conv.get_prompt()
+    
+    def __getitem__(self, idx):
+        cur_sample = self.data[idx]
+                     
+        video_path = os.path.join(self.video_dir, cur_sample["video"])
+        video,frame_time,video_time = load_video(video_path)
+        video = self.image_processor.preprocess(video, return_tensors="pt")["pixel_values"].cuda().bfloat16()
+
+        if "next" in self.video_dir.lower():
+                prompt, label = self.process_nextqa(cur_sample)
+        if "anet" in self.video_dir.lower():
+            if "caption" in self.data_name.lower():
+                prompt, label, timestamp = self.process_anet_caption(cur_sample)
+                start, end = timestamp
+            if "qa" in self.data_name.lower():
+                prompt = cur_sample['question']
+        
+        prompt = self._build_prompt(prompt, video, frame_time, video_time)
+        input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        prompt_len = len(input_ids)
+        
+        labels = input_ids.clone()
+        labels[:prompt_len] = IGNORE_INDEX
+        
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "images" : video,
+            "modalities" : "video"
+        }
+    
+class DataCollatorForBaseDataset:
+    def __init__(self, pad_token_id, ignore_index=-100):
+        self.pad_token_id = pad_token_id
+        self.ignore_index = ignore_index
+
+    def __call__(self, batch):
+        batch = [b for b in batch if b is not None]
+        if len(batch) == 0:
+            return None
+        
+        max_len = max(len(b["input_ids"]) for b in batch)
+        input_ids = torch.full((len(batch), max_len), self.pad_token_id, dtype=torch.long)
+        attn = torch.zeros((len(batch), max_len), dtype=torch.long)
+        images = [b["images"] for b in batch]
+        modalities = [b["modalities"] for b in batch]
+        labels = None
+            
+        for i, b in enumerate(batch):
+            l = len(b["input_ids"])
+            input_ids[i, :l] = b["input_ids"]
+            attn[i, :l] = 1
+                
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attn,
+            "images" :  images,
+            "modalities" : modalities,
+        }  
         
 if __name__ == "__main__":
     dataset = CustomDataset(

@@ -62,6 +62,8 @@ def train(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--model_path", type=str, required=True)
+    p.add_argument('--model_type', type=str, required=True, help='pretrained model type')
+    p.add_argument('--tokenizer_path', type=str, required=True, help='tokenizer path')
     p.add_argument("--video_dir", type=str, required=True)
     p.add_argument("--train_ann", type=str, required=True)
     p.add_argument("--temp_dir", type=str, default="tmp")
