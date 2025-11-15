@@ -10,7 +10,7 @@ class MotionVectorExtractor:
                  mb_size=16):
         self.temp_dir = temp_dir if temp_dir is not None else 'tmp'
         self.rescale = rescale
-        self.ffmpeg_path = ffmpeg_path if ffmpeg_path is not None else '/home/aix23103/anaconda3/envs/llavanext/bin/ffmpeg'
+        self.ffmpeg_path = ffmpeg_path if ffmpeg_path is not None else '/home/aix21002/.local/bin/ffmpeg'
         self.max_frames = max_frames
         self.fps = sample_size
         self.rng = np.random.default_rng(seed)
@@ -38,7 +38,7 @@ class MotionVectorExtractor:
         else:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             cmd = [
-                "ffmpeg",
+                self.ffmpeg_path,
                 "-loglevel", "error",
                 "-i", org_path,
                 "-vf", "fps=6,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",  # 프레임/해상도 정규화
@@ -54,10 +54,14 @@ class MotionVectorExtractor:
                 "-y",
                 output_path
             ]
+            
+            env = os.environ.copy()
+            env["LD_LIBRARY_PATH"] = "/home/aix21002/.local/lib:" + env.get("LD_LIBRARY_PATH", "")
 
             # 실행
             subprocess.run(
                 cmd,
+                env=env,
                 stdout=subprocess.DEVNULL,
                 check=True
             )

@@ -10,6 +10,7 @@ def infer(args):
         args.model_path,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=False, 
+        attn_implementation="flash_attention_2"
         # quantization_config=bnbconfig,
     )
     max_length = model.config.max_position_embeddings
