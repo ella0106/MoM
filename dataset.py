@@ -44,6 +44,9 @@ class CustomDataset(Dataset):
                     images, motion_feats, residual_feats = images[start:end+1], motion_feats[start:end+1], residual_feats[start:end+1]
                 if "qa" in self.data_name.lower():
                     prompt, label = self.process_anet_qa(cur_sample)
+            else:
+                prompt = cur_sample['question']
+                label = cur_sample['q_uid']
 
             prompt = self._build_prompt(prompt)
             input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
@@ -102,9 +105,10 @@ class CustomDataset(Dataset):
     def process_anet_qa(self, cur_sample):
         question = cur_sample['question']
         question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
-                    f"Question: {question} \nAnswer the question breifly."
+                    f"Question: {question} \nAnswer the question using a single word or phrase."
         )
-        answer = cur_sample['answer']
+        # answer = cur_sample['answer'] if cur_sample['answer'] is not None else None
+        answer = None
         return question, answer
         
 class DataCollatorForCustomDataset:
@@ -168,7 +172,7 @@ class BaseDataset(Dataset):
         return len(self.data)
     
     def _build_prompt(self, question, video, frame_time, video_time):
-        time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {len(video[0])} frames are uniformly sampled from it. These frames are located at {frame_time}.Please answer the following questions related to this video."
+        time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {len(video[0])} frames are uniformly sampled from it. These frames are located at {frame_time}. Please answer the following questions related to this video."
         question = DEFAULT_IMAGE_TOKEN + f"{time_instruciton}\n{question}"
         conv = copy.deepcopy(conv_templates[self.conv_template])
         conv.append_message(conv.roles[0], question)
@@ -189,7 +193,7 @@ class BaseDataset(Dataset):
                 prompt, label, timestamp = self.process_anet_caption(cur_sample)
                 start, end = timestamp
             if "qa" in self.data_name.lower():
-                prompt = cur_sample['question']
+                prompt = cur_sample['question'] + " Answer the question using a single word or phrase."
         
         prompt = self._build_prompt(prompt, video, frame_time, video_time)
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
@@ -238,9 +242,9 @@ class DataCollatorForBaseDataset:
         
 if __name__ == "__main__":
     dataset = CustomDataset(
-        video_dir='dataset/Anet/',
-        temp_dir='tmp/',
-        txt='dataset/captions/train_vids.json',
+        video_dir='dataset/egoschema/',
+        temp_dir='/mnt/aix21002/MoM/tmp/',
+        txt='/mnt/aix21002/EgoSchema/questions.json',
         tokenizer=AutoTokenizer.from_pretrained("lmms-lab/LLaVA-Video-7B-Qwen2"),
         max_len=1024,
         conv_template="qwen_1_5"
