@@ -103,11 +103,10 @@ class CustomDataset(Dataset):
         return question, answer, timestamp
     
     def process_anet_qa(self, cur_sample):
-        question = cur_sample['question']
-        question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues. Please answer the following questions related to this video.\n"
-                    f"Question: {question} \nAnswer the question using a single word or phrase."
+        question = cur_sample['question'].capitalize() + "?"
+        question = ("The video frames are extracted at 2 fps, followed by auxiliary motion tokens that can be used as additional cues.\n"
+                    f"{question} Answer the question using a single word or phrase."
         )
-        # answer = cur_sample['answer'] if cur_sample['answer'] is not None else None
         answer = None
         return question, answer
         
@@ -172,8 +171,8 @@ class BaseDataset(Dataset):
         return len(self.data)
     
     def _build_prompt(self, question, video, frame_time, video_time):
-        time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {len(video[0])} frames are uniformly sampled from it. These frames are located at {frame_time}. Please answer the following questions related to this video."
-        question = DEFAULT_IMAGE_TOKEN + f"{time_instruciton}\n{question}"
+        # time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {len(video[0])} frames are uniformly sampled from it. These frames are located at {frame_time}. Please answer the following questions related to this video."
+        question = DEFAULT_IMAGE_TOKEN + f"{question}"
         conv = copy.deepcopy(conv_templates[self.conv_template])
         conv.append_message(conv.roles[0], question)
         conv.append_message(conv.roles[1], None)
@@ -193,7 +192,7 @@ class BaseDataset(Dataset):
                 prompt, label, timestamp = self.process_anet_caption(cur_sample)
                 start, end = timestamp
             if "qa" in self.data_name.lower():
-                prompt = cur_sample['question'] + " Answer the question using a single word or phrase."
+                prompt = cur_sample['question'].capitalize() + "? Answer the question using a single word or phrase."
         
         prompt = self._build_prompt(prompt, video, frame_time, video_time)
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")

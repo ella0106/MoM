@@ -312,6 +312,7 @@ class LlavaMetaForCausalLM(ABC):
             encoded_image_features = [torch.stack(combined_feats, dim=0)]    
                 
         image_features = [x.flatten(0, 1) for x in encoded_image_features]
+        # image_features = [x.flatten(0, 1) for x in split_motion_features]
 
         # print([x.shape for x in image_features])
 
