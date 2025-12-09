@@ -15,6 +15,7 @@ def get_model(args):
 
     model.requires_grad_(False)
     model.get_motion_tower().requires_grad_(True)
+    model.model.mm_projector.requires_grad_(True)
     
     max_length = model.config.max_position_embeddings
 

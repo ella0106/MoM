@@ -221,57 +221,76 @@ class ResidualProcessor:
         if not motions_norm or not motion_idx:
             return torch.empty(0, device=self.device, dtype=self.dtype)
 
-        prev_frames = np.stack([frames[i - 1] for i in motion_idx])
-        N, H0, W0, _ = prev_frames.shape
-
-        Hr = max(1, int(H0 * self.warp_ratio))
-        Wr = max(1, int(W0 * self.warp_ratio))
-
-        # 결과 누적용 리스트
-        residual_chunks = []
-
-        if motions_raw is None:
-            motions_raw = [np.zeros((Hr, Wr, 2), dtype=np.float16) for _ in range(N)]
-
-        # 🔹 Chunk 단위로 처리 (GPU 효율 + OOM 방지)
-        for start in range(0, N // 12, self.chunk):
-            end = min(start + self.chunk, N // 12)
+        B = len(motions_raw)
+        _, H, W, C = motions_raw[0].shape
+        prevs = torch.from_numpy(np.stack([frames[i-1].transpose(2, 0, 1) for i in motion_idx]).reshape(B, -1, 3, H, W)).to(self.dtype)
+        currs = torch.from_numpy(np.stack([frames[i].transpose(2, 0, 1) for i in motion_idx]).reshape(B, -1, 3, H, W)).to(self.dtype)
+        motions_raw = torch.from_numpy(np.stack(motions_raw).transpose(0, 1, 4, 2, 3)).to(self.dtype)
+        
+        residuals = []
+        for i in range(len(motions_raw)):
+            if motion_idx[0] == 0:
+                prevs[0][0] = torch.zeros((3, H, W))
+            res = self.compute_residual(prevs[i], currs[i], motions_raw[i])
+            residuals.append(res.contiguous())
             
-            pf_np = prev_frames[start * self.frame_num:end * self.frame_num]
-            pf = torch.from_numpy(pf_np).to(self.device, dtype=self.dtype, non_blocking=True)
-            pf = pf.permute(0, 3, 1, 2).contiguous()
-            pf_r = F.interpolate(pf.to(self.device, dtype=self.dtype), size=(Hr, Wr), mode="bilinear", align_corners=False)
-            
-            raw_np = np.stack(motions_raw[start:end], axis=0)  # [chunk, 12, Hb, Wb, 2]
-            raw_np = raw_np.reshape(-1, raw_np.shape[2], raw_np.shape[3], 2) # [chunk*12, Hb, Wb, 2]
-            
-            # GPU 전송
-            raw = torch.from_numpy(raw_np).to(self.device, dtype=torch.float16)
-            raw = raw.permute(0, 3, 1, 2).contiguous()
-            
-            with torch.cuda.amp.autocast(enabled=True):
-                flow_r = F.interpolate(raw, size=(Hr, Wr), mode="bilinear", align_corners=False)
-                flow_r = flow_r.permute(0, 2, 3, 1).contiguous()        
-                flow_r[..., 0] *= (2.0 * Wr / float(W0)) / (Wr - 1)
-                flow_r[..., 1] *= (2.0 * Hr / float(H0)) / (Hr - 1)
-            
-                warped = F.grid_sample(pf_r, flow_r.half(), mode='bilinear',
-                                   padding_mode='border', align_corners=False)
+        return torch.cat(residuals).view(B, -1, 3, self.height, self.width)
+    
+    def compute_residual(self, prev, curr, flow):
+        """
+        prev: [B, 3, H, W]  previous frame
+        curr: [B, 3, H, W]  current frame
+        flow: [B, 2, H, W]  (dx, dy) in pixel units
+        """
 
-                pf_r.sub_(warped).add_(128.0).clamp_(0.0, 255.0)
+        B, C, H, W = prev.shape
+        prev = prev.to(self.device)
+        curr = curr.to(self.device)
+        flow = flow.to(self.device)
 
-                # 다운스케일 + dtype 통일
-                residuals = F.interpolate(pf_r, size=(self.height, self.width),
-                                        mode="bilinear", align_corners=False)
-            residual_chunks.append(residuals.to(self.dtype).contiguous())
+        # ===== 1. base grid 생성 =====
+        y, x = torch.meshgrid(
+            torch.arange(H, device=prev.device),
+            torch.arange(W, device=prev.device),
+            indexing='ij'
+        )
+        x = x.float()
+        y = y.float()
 
-            # 메모리 정리
-            del pf, pf_r, raw, flow_r, warped
-        torch.cuda.empty_cache()
+        # shape: [1,H,W]
+        x = x.unsqueeze(0).expand(B, -1, -1)
+        y = y.unsqueeze(0).expand(B, -1, -1)
 
-        residuals_all = torch.cat(residual_chunks, dim=0)
-        B = len(motions_norm)
-        return residuals_all.view(B, -1, 3, self.height, self.width)
+        dx = flow[:, 0]   # [B,H,W]
+        dy = flow[:, 1]   # [B,H,W]
+
+        # ===== 2. warp할 목표 좌표 (previous → current) =====
+        x2 = x + dx
+        y2 = y + dy
+
+        # ===== 3. grid normalize =====
+        grid_x = (2.0 * x2 / (W - 1)) - 1.0
+        grid_y = (2.0 * y2 / (H - 1)) - 1.0
+
+        grid = torch.stack([grid_x, grid_y], dim=-1).to(self.dtype)  # [B,H,W,2]
+
+        # ===== 4. previous frame warp =====
+        warped_prev = F.grid_sample(
+            prev, grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True
+        )
+
+        # ===== 5. residual 계산 =====
+        residual = curr - warped_prev
+
+        # 영상 코드처럼 128 shifting
+        residual = residual + 128.0
+        residual = residual.clamp(0, 255)
+        residual = F.interpolate(residual, size=(self.height, self.width), mode="bilinear", align_corners=False)
+
+        return residual  # [B,3,H,W]
             
 class MotionFeatureExtractor:
     def __init__(self, width=384, height=384, frame_num=12, device=None, dtype=torch.float16):
@@ -305,7 +324,7 @@ class MotionFeatureExtractor:
 
 
 if __name__ == "__main__":
-    video_path = '/data2/aix23103/MoM/assets/cat_and_chicken.mp4'
+    video_path = '/mnt/aix21002/MoM/dataset/Anet/v__-zOtZZ_fwI.mp4'
     import time
 
     start = time.time() 
