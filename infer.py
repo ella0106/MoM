@@ -2,17 +2,37 @@ from utils.utils import *
 from transformers import AutoTokenizer, GenerationConfig
 from dataset import CustomDataset, DataCollatorForCustomDataset
 from model.llava_qwen_mom import LlavaQwenMomForCausalLM
+from model.llava_qwen import LlavaQwenForCausalLM, LlavaQwenConfig
 
 def infer(args):
     rank0_print("Loading model for inference...")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
-    model = LlavaQwenMomForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=False, 
-        attn_implementation="flash_attention_2"
-        # quantization_config=bnbconfig,
-    )
+    if args.model_type == 'mom':
+        model = LlavaQwenMomForCausalLM.from_pretrained(
+            args.model_path,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=False, 
+            # quantization_config=bnbconfig,
+        )
+        processor = model.get_vision_tower().image_processor
+    elif args.model_type == 'qwen':
+        config = LlavaQwenConfig.from_pretrained(
+            args.model_path,
+            use_motion_tower=True,
+            torch_dtype=torch.float16,
+        )
+        model = LlavaQwenForCausalLM.from_pretrained(
+            args.model_path,
+            config=config,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=False, 
+            # quantization_config=bnbconfig,
+        )
+        for n, p in model.named_parameters():
+            if p.dtype != torch.float16:
+                print(n, p.dtype)
+        processor = model.get_vision_tower().image_processor
+        
     max_length = model.config.max_position_embeddings
     
     model.eval()
@@ -28,9 +48,12 @@ def infer(args):
         txt=args.dataset,
         temp_dir=args.temp_dir,
         tokenizer=tokenizer,
-        max_len=max_length,
         conv_template="qwen_1_5",
-        train=False
+        train=False,
+        gop_num=model.config.gop_num if hasattr(model.config, 'gop_num') else 8,
+        fps=model.config.fps if hasattr(model.config, 'fps') else 4,
+        image_processor=processor,
+        config=model.config,
     )
     
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -49,6 +72,7 @@ def infer(args):
         max_new_tokens=128,
         do_sample=False,
         temperature=1,
+        pad_token_id=pad_id
     )
     
     results = {}
