@@ -1,179 +1,237 @@
-from utils.utils import *
+import math
+from typing import Tuple, Optional
 
-# ----------------------------
-# Frame encoder
-# ----------------------------
-class FrameEncoder(nn.Module):
-    def __init__(self, in_chans, hidden_dim):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# -----------------------------
+# utils: patchify + pos-embed
+# -----------------------------
+def _pad_to_multiple(x: torch.Tensor, multiple: int) -> torch.Tensor:
+    """Pad (right,bottom) so H,W are multiples of `multiple`."""
+    _, _, h, w = x.shape
+    new_h = math.ceil(h / multiple) * multiple
+    new_w = math.ceil(w / multiple) * multiple
+    pad_h = new_h - h
+    pad_w = new_w - w
+    if pad_h == 0 and pad_w == 0:
+        return x
+    return F.pad(x, (0, pad_w, 0, pad_h))
+
+
+def _patchify(x: torch.Tensor, patch: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
+    """
+    x: (B,C,H,W) with H,W multiple of patch
+    returns tokens: (B, N, C*patch*patch), grid (Ph,Pw)
+    """
+    b, c, h, w = x.shape
+    ph, pw = h // patch, w // patch
+    patches = x.unfold(2, patch, patch).unfold(3, patch, patch)  # (B,C,Ph,Pw,p,p)
+    patches = patches.contiguous().permute(0, 2, 3, 1, 4, 5)     # (B,Ph,Pw,C,p,p)
+    tokens = patches.reshape(b, ph * pw, c * patch * patch)
+    return tokens, (ph, pw)
+
+
+def _interp_abs_pos_embed(
+    pos_embed: torch.Tensor,
+    base_grid: Tuple[int, int],
+    target_grid: Tuple[int, int],
+) -> torch.Tensor:
+    """
+    pos_embed: (1, base_ph*base_pw, D) learned on base_grid
+    return: (1, target_ph*target_pw, D)
+    """
+    base_ph, base_pw = base_grid
+    tgt_ph, tgt_pw = target_grid
+    d = pos_embed.shape[-1]
+
+    pe = pos_embed.view(1, base_ph, base_pw, d).permute(0, 3, 1, 2)  # (1,D,base_ph,base_pw)
+    if (tgt_ph, tgt_pw) != (base_ph, base_pw):
+        pe = F.interpolate(pe, size=(tgt_ph, tgt_pw), mode="bilinear", align_corners=False)
+    pe = pe.permute(0, 2, 3, 1).contiguous().view(1, tgt_ph * tgt_pw, d)
+    return pe
+
+class MotionEncoder(nn.Module):
+    """
+    Input : (B, T, 2, 96, 96)
+    Output: motion tokens (B, Nm, 256)
+    """
+    def __init__(
+        self,
+        in_channels=2,
+        patch_size=7,
+        embed_dim=256,
+        num_layers=2,
+        nhead=8,
+        mlp_ratio=4,
+        base_input_hw=(96, 96),
+        pool_hw=(9, 9),   # Nm = 81
+    ):
         super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(in_chans, 64, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1)
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.pool_hw = pool_hw
+
+        base_ph = math.ceil(base_input_hw[0] / patch_size)
+        base_pw = math.ceil(base_input_hw[1] / patch_size)
+        self.base_grid = (base_ph, base_pw)
+
+        self.patch_embed = nn.Linear(in_channels * patch_size * patch_size, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, base_ph * base_pw, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=nhead,
+            dim_feedforward=embed_dim * mlp_ratio,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
         )
-        self.fc = nn.Linear(64, hidden_dim)
+        self.encoder = nn.TransformerEncoder(layer, num_layers)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        self.spatial_pool = nn.AdaptiveAvgPool2d(pool_hw)
+
+    def forward(self, mv):
+        """
+        mv: (BF, T, 2, H, W)   # BF = already concatenated (batch * frames)
+        return: (BF, Nm, D)
+        """
+        BF, T, C, H, W = mv.shape
+
+        # ---- flatten temporal ----
+        mv = mv.view(BF * T, C, H, W)   # (BF*T, 2, H, W)
+
+        # ---- preprocessing ----
+        mv = _pad_to_multiple(mv, self.patch_size)
+        tokens, (ph, pw) = _patchify(mv, self.patch_size)   # (BF*T, P, Cpp)
+
+        x = self.patch_embed(tokens)
+        x = x + _interp_abs_pos_embed(
+            self.pos_embed, self.base_grid, (ph, pw)
+        )
+
+        # ---- encoding ----
+        x = self.encoder(x)
+        x = self.norm(x)   # (BF*T, P, D)
+
+        # ---- spatial pool (frame-wise, no mixing) ----
+        x = x.view(BF * T, ph, pw, self.embed_dim)
+        x = x.permute(0, 3, 1, 2)           # (BF*T, D, ph, pw)
+        x = self.spatial_pool(x)            # (BF*T, D, oh, ow)
+
+        oh, ow = self.pool_hw
+        x = x.permute(0, 2, 3, 1)
+        x = x.reshape(BF, T, oh * ow, self.embed_dim)
+
+        # ---- temporal aggregation (per BF) ----
+        x = x.mean(dim=1)                   # (BF, Nm, D)
+
+        return x
+
+
+class MotionProjector(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.LayerNorm(256),
+            nn.Linear(256, 1152),
+        )
 
     def forward(self, x):
-        # x: (B, T, C, H, W)
-        B, T, C, H, W = x.shape
-        x = x.view(B*T, C, H, W)
-        feat = self.cnn(x).flatten(1)  # (B*T, 64)
-        feat = self.fc(feat)           # (B*T, D)
-        return feat.view(B, T, -1)     # (B, T, D)
+        return self.proj(x)  # (B, Nm, 1152)
 
-# ----------------------------
-# Positional encoding (GOP + Frame index)
-# ----------------------------
-class TemporalPositionalEncoding(nn.Module):
-    def __init__(self, num_gops, num_frames, dim):
+
+class CrossAttentionFusion(nn.Module):
+    """
+    Implements:
+      F_attn = Attention(Q=F_I, K,V=F_MV)
+      F_GOP  = FFN( Bottleneck(F_attn) + F_I )
+    """
+    def __init__(
+        self,
+        dim: int = 1152,
+        num_heads: int = 8,
+        ffn_ratio: int = 4,
+        bottleneck_ratio: int = 4,
+        dropout: float = 0.0,
+    ):
         super().__init__()
-        self.gop_embed = nn.Embedding(num_gops, dim)
-        self.frame_embed = nn.Embedding(num_frames, dim)
 
-    def forward(self, gop_ids, frame_ids):
-        gop_pos = self.gop_embed(gop_ids).unsqueeze(1)     # (B, 1, D)
-        frame_pos = self.frame_embed(frame_ids)            # (B, T, D)
-        return gop_pos, frame_pos
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_kv = nn.LayerNorm(dim)
 
-# ----------------------------
-# Transformer blocks
-# ----------------------------
-class SelfAttentionBlock(nn.Module):
-    def __init__(self, dim, depth=2, heads=8):
-        super().__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim, nhead=heads, batch_first=True
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
 
-    def forward(self, x):
-        return self.transformer(x)
+        # residual bottleneck applied to attention output before adding to image
+        bn = max(1, dim // bottleneck_ratio)
+        self.res_bottleneck = nn.Sequential(
+            nn.Linear(dim, bn),
+            nn.GELU(),
+            nn.Linear(bn, dim),
+        )
 
-class CrossAttentionBlock(nn.Module):
-    def __init__(self, dim, heads=8):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
+        # FFN (no residual add after it)
+        hidden = dim * ffn_ratio
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(dim),           # optional but common; doesn't change "residual count"
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+        )
 
-    def forward(self, q, kv):
-        out, _ = self.attn(q, kv, kv)
-        return out
-
-# ----------------------------
-# 전체 모델
-# ----------------------------
-class MVResidualModel(nn.Module):
-    def __init__(self, in_chans_mv=2, in_chans_res=3, dim=768, num_gops=100, num_frames=12, depth=2, heads=8):
-        super().__init__()
+    def forward(self, F_I: torch.Tensor, F_MV: torch.Tensor) -> torch.Tensor:
+        """
+        F_I : (B, Ni, dim)   image tokens (e.g., (1, 81, 1152))
+        F_MV: (B, Nm, dim)   motion tokens projected to same dim (e.g., 1152)
+        """
+        F_attn, _ = self.attn(
+            query=self.norm_q(F_I),
+            key=self.norm_kv(F_MV),
+            value=self.norm_kv(F_MV),
+        )
         
-        self.mv_encoder = FrameEncoder(in_chans_mv, dim)
-        self.res_encoder = FrameEncoder(in_chans_res, dim)
-
-        self.pos_enc = TemporalPositionalEncoding(num_gops, num_frames, dim)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))  # GOP CLS
-
-        self.mv_self = SelfAttentionBlock(dim, depth, heads)
-        self.res_self = SelfAttentionBlock(dim, depth, heads)
-
-        self.cross_mv2res = CrossAttentionBlock(dim, heads)
-        self.cross_res2mv = CrossAttentionBlock(dim, heads)
+        x = F_I + self.res_bottleneck(F_attn)
         
-        self.fc = nn.Linear(dim, 1152)
+        return self.ffn(x)
 
-    def forward(self, mv_frames, res_frames):
+class GOPPipeline(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.motion_enc = MotionEncoder()
+        self.motion_proj = MotionProjector()
+
+    def forward(self, motion_vectors):
         """
-        mv_frames:  (B, T, 2, H, W)
-        res_frames: (B, T, 3, H, W)
-        gop_ids:    (B,) GOP index
+        image_tokens  : (B, 81, 1152)  # SigLIP + 2D pool 결과
+        motion_vectors: (B, T, 2, 96, 96)
         """
-        B, T, _, _, _ = mv_frames.shape
-        gop_ids = torch.arange(B, device=mv_frames.device)  # (B,)
-        frame_ids = torch.arange(T, device=mv_frames.device).unsqueeze(0).repeat(B, 1)  # (B,T)
 
-        # 1. Frame encoding
-        mv_feat = self.mv_encoder(mv_frames)    # (B, T, D)
-        res_feat = self.res_encoder(res_frames) # (B, T, D)
-
-        # 2. Add GOP CLS + positional embedding
-        gop_pos, frame_pos = self.pos_enc(gop_ids, frame_ids)
-
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # (B,1,D)
-        mv_feat = torch.cat([cls_tokens, mv_feat], dim=1) + torch.cat([gop_pos, frame_pos], dim=1)
-        res_feat = torch.cat([cls_tokens, res_feat], dim=1) + torch.cat([gop_pos, frame_pos], dim=1)
-
-        # 3. Self-attention per branch
-        mv_feat = self.mv_self(mv_feat)    # (B, T+1, D)
-        res_feat = self.res_self(res_feat) # (B, T+1, D)
-
-        # 4. Cross-attention
-        mv2res = self.cross_mv2res(res_feat, mv_feat)  # (B, T+1, D)
-        # res2mv = self.cross_res2mv(mv_feat, res_feat)  # (B, T+1, D)
-        mv2res = self.fc(mv2res) # (B, T+1, 1152)
-
-        # 5. 최종 feature
-        # fused = torch.cat([mv2res, res2mv], dim=-1)    # (B, T+1, 2D)
-        fused = mv2res
+        F_MV = self.motion_enc(motion_vectors)      # (B, Nm, 256)
+        F_MV = self.motion_proj(F_MV)               # (B, Nm, 1152)
         
-        return fused
-    
-class EarlyFusionProjector(nn.Module):
-    def __init__(self, in_chans=8, out_chans=3):
-        super().__init__()
-        # naive: just 1x1 conv to collapse channels
-        self.proj = nn.Conv2d(in_chans, out_chans, kernel_size=1)
+        return F_MV
 
-    def forward(self, rgb, mv, res):
-        """
-        rgb: (T,H,W,3)
-        mv:  (T,H,W,2)
-        res: (T,H,W,3)
-        """
-        fused = np.concatenate([rgb, mv, res], axis=-1)  # (T,H,W,8)
-        fused = torch.from_numpy(fused).permute(0,3,1,2).float()  # (T,8,H,W)
-        fused = self.proj(fused)  # (T,3,H,W)
-        return fused
-
-class LateFusionProjector(nn.Module):
-    def __init__(self, dim_rgb, dim_mvres, dim_out):
-        super().__init__()
-        self.proj = nn.Linear(dim_rgb + dim_mvres, dim_out)
-
-    def forward(self, rgb_feat, mvres_feat):
-        """
-        rgb_feat:   (B, T, D_rgb)  # frame encoder output (LLaVA vision tower output or pooled feature)
-        mvres_feat: (B, T, D_mvres) # MVResidualModel의 frame token (CLS 제외)
-        """
-        assert rgb_feat.size(1) == mvres_feat.size(1), "Frame alignment mismatch!"
-
-        fused = torch.cat([rgb_feat, mvres_feat], dim=-1)  # (B, T, D_rgb+D_mvres)
-        fused = self.proj(fused)                           # (B, T, D_out)
-        return fused
-
-# ----------------------------
-# 위에서 정의한 MVResidualModel 불러오기
-# ----------------------------
-# (코드를 한 파일에 넣는다면 여기 import 대신 class 정의 붙여넣기)
 
 if __name__ == "__main__":
-    # 가짜 입력 생성
-    B, T, H, W = 2, 12, 224, 224   # batch=2, GOP=12프레임
-    mv_frames = torch.randn(B, T, 2, H, W)    # motion vector (dx, dy)
-    res_frames = torch.randn(B, T, 3, H, W)   # residual (3채널)
-    gop_ids = torch.arange(B)            # 배치별 GOP index
+    B, T = 8, 8
+    img_tokens = torch.randn(B, 81, 1152)          # image tokens
+    mv = torch.randn(B, T, 2, 96, 96)              # motion vectors
 
-    # 모델 초기화
-    model = MVResidualModel(
-        in_chans_mv=2,
-        in_chans_res=3,
-        dim=256,         # 테스트라서 작은 dim
-        num_gops=B,
-        num_frames=12,
-        depth=2,
-        heads=4
-    )
-
-    # forward
-    out = model(mv_frames, res_frames, gop_ids)
-
-    print("Output shape:", out.shape)   # (B, T+1, 2D)
-    print("첫 번째 CLS 토큰 shape:", out[:, 0].shape)  # (B, 2D)
-    print("나머지 frame 토큰 shape:", out[:, 1:].shape) # (B, T, 2D)
+    import time
+    start = time.time()
+    gop = GOPPipeline()
+    out = gop(img_tokens, mv)
+    end = time.time()
+    print(f"Elapsed time: {end - start:.4f} sec")
+    print(out.shape)  # (B, 81, 1152)

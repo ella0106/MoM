@@ -20,7 +20,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split, DistributedSampler, Subset
+from torch.utils.data import Dataset, DataLoader, random_split, DistributedSampler, Subset, IterableDataset, get_worker_info
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 torch.backends.cudnn.benchmark = True
@@ -35,17 +35,24 @@ from .constants import *
 from decord import VideoReader
 
 def load_file(file_name):
-    annos = None
-    if osp.splitext(file_name)[-1] == '.csv':
-        return pd.read_csv(file_name)
-    with open(file_name, 'r') as fp:
-        if osp.splitext(file_name)[1]== '.txt':
-            annos = fp.readlines()
-            annos = [line.rstrip() for line in annos]
-        if osp.splitext(file_name)[1] == '.json':
-            annos = json.load(fp)
+    ext = osp.splitext(file_name)[1].lower()
 
-    return annos
+    if ext == ".csv":
+        return pd.read_csv(file_name)
+
+    if ext == ".parquet":
+        return pd.read_parquet(file_name)
+
+    if ext == ".txt":
+        with open(file_name, "r", encoding="utf-8") as fp:
+            annos = fp.readlines()
+        return [line.rstrip() for line in annos]
+
+    if ext == ".json":
+        with open(file_name, "r", encoding="utf-8") as fp:
+            return json.load(fp)
+
+    raise ValueError(f"Unsupported file type: {file_name}")
 
 def save_file(obj, filename):
     """
@@ -75,8 +82,38 @@ def rank_print(*args):
     else:
         print(*args)
         
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")]
+def fast_tokenizer_image_token(
+    prompt: str,
+    tokenizer,
+    image_token_index: int,
+    modality: str,
+):
+    # 1) split 기준 결정
+    sep = "<video>" if modality == "video" else "<image>"
+    chunks = prompt.split(sep)
+
+    # 2) 각 chunk를 tokenize (하지만 결과는 tensor로)
+    token_chunks = [
+        tokenizer(chunk, add_special_tokens=False).input_ids
+        for chunk in chunks
+    ]
+
+    # 3) interleave (토큰 + image 토큰)
+    # image token은 chunk 사이마다 1개
+    out = []
+    for i, ids in enumerate(token_chunks):
+        out.extend(ids)
+        if i < len(token_chunks) - 1:
+            out.append(image_token_index)
+
+    return torch.tensor(out, dtype=torch.long)
+
+
+def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None, modality=None):
+    if modality == "video":
+        prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<video>")]
+    else:
+        prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")]
 
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]
@@ -115,3 +152,7 @@ def load_video(video_path, max_frames_num=64,fps=1,force_sample=False):
     spare_frames = vr.get_batch(frame_idx).asnumpy()
     # import pdb;pdb.set_trace()
     return spare_frames,frame_time,video_time
+
+def load_image(image_path):
+    image = Image.open(image_path).convert("RGB")
+    return image

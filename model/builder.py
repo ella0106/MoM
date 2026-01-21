@@ -3,7 +3,7 @@ import torch.nn as nn
 import re
 import os
 from .siglip_encoder import SigLipVisionTower
-from .encoder import MVResidualModel
+from .encoder import GOPPipeline, CrossAttentionFusion
 
 class IdentityMap(torch.nn.Module):
     def __init__(self):
@@ -17,7 +17,7 @@ class IdentityMap(torch.nn.Module):
         return {"mm_resampler_type": None}
 
 
-def build_vision_projector(config, delay_load=False, **kwargs):
+def build_vision_projector(config, **kwargs):
     projector_type = getattr(config, "mm_projector_type", "linear")
 
     if projector_type == "linear":
@@ -34,9 +34,16 @@ def build_vision_projector(config, delay_load=False, **kwargs):
 
     raise ValueError(f"Unknown projector type: {projector_type}")
 
-def build_vision_tower(vision_tower_cfg, **kwargs):
+def build_vision_tower(**kwargs):
     vision_tower = "google/siglip-so400m-patch14-384"
-    return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+    return SigLipVisionTower(vision_tower, **kwargs)
 
-def build_motion_tower():
-    return MVResidualModel()
+def build_motion_tower(config):
+    if not getattr(config, "use_motion_tower", False):
+        return None
+    return GOPPipeline()
+
+def build_fusion_module(config):
+    if not getattr(config, "use_motion_tower", False):
+        return IdentityMap()
+    return CrossAttentionFusion()

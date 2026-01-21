@@ -34,6 +34,16 @@ from transformers import Qwen2Config, Qwen2Model, Qwen2ForCausalLM
 
 class LlavaQwenConfig(Qwen2Config):
     model_type = "llava_qwen"
+    
+    def __init__(
+        self,
+        use_motion_tower=False,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+        self.use_motion_tower = use_motion_tower
+        self.mm_projector_type = kwargs.get("mm_projector_type", "mlp2x_gelu")
 
 
 class LlavaQwenModel(LlavaMetaModel, Qwen2Model):
@@ -75,12 +85,14 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         modalities: Optional[List[str]] = ["image"],
+        motion_feats: Optional[torch.FloatTensor] = None,
+        residual_feats: Optional[torch.FloatTensor] = None,
         dpo_forward: Optional[bool] = False,
         cache_position=None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        if inputs_embeds is None:
-            (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities, image_sizes)
+        if inputs_embeds is None and images is not None:
+            (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, motion_feats, residual_feats, modalities, image_sizes)
 
         if dpo_forward:
             outputs = self.model(
@@ -120,6 +132,8 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.Tensor] = None,
         image_sizes: Optional[torch.Tensor] = None,
         modalities: Optional[List[str]] = ["image"],
+        motion_feats: Optional[torch.FloatTensor] = None,
+        residual_feats: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         position_ids = kwargs.pop("position_ids", None)
@@ -128,7 +142,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             raise NotImplementedError("`inputs_embeds` is not supported")
 
         if images is not None:
-            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(inputs, position_ids, attention_mask, None, None, images, modalities, image_sizes=image_sizes)
+            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(inputs, position_ids, attention_mask, None, None, images, motion_feats, residual_feats, modalities, image_sizes=image_sizes)
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
 
